@@ -38,6 +38,45 @@ use {
 
 mod error;
 
+// start custom
+// ======================
+
+#[derive(Serialize, Deserialize)]
+struct InscriptionJsonDetailedItem {
+    id: InscriptionId,
+    number: u64,
+    height: u64,
+    genesis_fee: u64,
+    genesis_txid: Txid,
+    timestamp: u32,
+    address: String,
+    location: String,
+    content_length: u64,
+    content_type: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct InscriptionsJson {
+    inscriptions: Vec<InscriptionJsonItem>,
+}
+
+#[derive(Deserialize, Clone, Copy)]
+struct InscriptionsQuery {
+    offset: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct InscriptionJsonItem {
+    id: InscriptionId,
+    number: u64,
+    height: u64,
+    timestamp: u32,
+}
+
+// ======================
+// end custom
+
 enum BlockQuery {
   Height(u64),
   Hash(BlockHash),
@@ -168,6 +207,8 @@ impl Server {
         .route("/static/*path", get(Self::static_asset))
         .route("/status", get(Self::status))
         .route("/tx/:txid", get(Self::transaction))
+        .route("/api/inscriptions", get(Self::inscriptions_json))
+        .route("/api/inscriptions/:inscription_id", get(Self::inscription_single_json))
         .layer(Extension(index))
         .layer(Extension(page_config))
         .layer(Extension(Arc::new(config)))
@@ -867,6 +908,99 @@ impl Server {
       .page(page_config, index.has_sat_index()?),
     )
   }
+
+  async fn inscription_single_json(
+    Extension(page_config): Extension<Arc<PageConfig>>,
+    Extension(index): Extension<Arc<Index>>,
+    Path(inscription_id): Path<String>,
+  ) -> ServerResult<Response> {
+
+    // first try to parse inscription_id as an integer as it could be an inscription
+    // number
+    let inscription_id = match inscription_id.parse::<u64>() {
+      Ok(number) => {
+        let inscription_id = index
+          .get_inscription_id_by_inscription_number(number)?
+          .ok_or_not_found(|| format!("inscription {number}"))?;
+        inscription_id
+      },
+      Err(_) => {
+        let inscription_id = inscription_id.parse::<InscriptionId>().map_err(|_err| ServerError::BadRequest(format!("invalid inscription ID: {}", inscription_id)))?;
+        inscription_id
+      }
+    };
+
+
+
+    let entry = index.get_inscription_entry(inscription_id)?.unwrap();
+    let inscription = index.get_inscription_by_id(inscription_id)?.unwrap();
+    let satpoint = index.get_inscription_satpoint_by_id(inscription_id)?.unwrap();
+    let output = index.get_transaction(satpoint.outpoint.txid)?.unwrap().output.into_iter().nth(satpoint.outpoint.vout.try_into().unwrap()).unwrap();
+    let address = Address::from_script(&output.script_pubkey, page_config.chain.network()).unwrap();
+
+
+    let content_length = inscription.content_length().unwrap_or(0);
+    let content_type = inscription.content_type().unwrap_or("text/plain");
+
+    let content_length = content_length.try_into().unwrap();
+    let content_type = content_type.to_string();
+
+    let result = InscriptionJsonDetailedItem{
+      id: inscription_id,
+      number: entry.number,
+      height: entry.height,
+      genesis_fee: entry.fee,
+      genesis_txid: satpoint.outpoint.txid,
+      timestamp: entry.timestamp,
+      address: address.to_string(),
+      location: satpoint.to_string(),
+      content_length,
+      content_type,
+    };
+
+    let json = serde_json::to_string(&result);
+
+    // axum response
+    Ok(([
+      (header::CONTENT_TYPE, "application/json"),
+    ],
+      json.unwrap()
+    ).into_response())
+  }
+
+  async fn inscriptions_json(
+    Extension(index): Extension<Arc<Index>>,
+    query: Query<InscriptionsQuery>,
+  ) -> ServerResult<Response> {
+    let offset = query.offset.unwrap_or(0);
+    let mut limit = query.limit.unwrap_or(300);
+
+    // if limit is greater than 300, set it to 300
+    if limit > 300 {
+      limit = 300;
+    }
+    let skip = offset * limit;
+    let inscriptions_iter = index.get_feed_inscriptions_with_skip(limit, skip).unwrap().into_iter();
+
+    let inscriptions = inscriptions_iter
+    .filter_map(|(number, id)| index.get_inscription_entry(id).ok().flatten().map(|entry| (number, id, entry)))
+    .map(|(number, id, entry)| InscriptionJsonItem {
+        id,
+        number,
+        height: entry.height,
+        timestamp: entry.timestamp,
+    })
+    .collect::<Vec<_>>();
+
+    let json = serde_json::to_string(&inscriptions);
+
+    Ok(([
+      (header::CONTENT_TYPE, "application/json"),
+    ],
+      json.unwrap()
+    ).into_response())
+  }
+
 
   async fn inscriptions(
     Extension(page_config): Extension<Arc<PageConfig>>,
