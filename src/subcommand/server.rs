@@ -72,6 +72,7 @@ struct InscriptionJsonItem {
     number: u64,
     height: u64,
     timestamp: u32,
+    content_type: String,
 }
 
 // ======================
@@ -982,13 +983,16 @@ impl Server {
     let skip = offset * limit;
     let inscriptions_iter = index.get_feed_inscriptions_with_skip(limit, skip).unwrap().into_iter();
 
+
     let inscriptions = inscriptions_iter
     .filter_map(|(number, id)| index.get_inscription_entry(id).ok().flatten().map(|entry| (number, id, entry)))
-    .map(|(number, id, entry)| InscriptionJsonItem {
+    .filter_map(|(number, id, entry)| index.get_inscription_by_id(id).ok().flatten().map(|inscription| (number, id, entry, inscription)))
+    .map(|(number, id, entry, inscription)| InscriptionJsonItem {
         id,
         number,
         height: entry.height,
         timestamp: entry.timestamp,
+        content_type: inscription.content_type().unwrap_or("text/plain").to_string(),
     })
     .collect::<Vec<_>>();
 
